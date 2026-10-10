@@ -15,7 +15,7 @@ Secrets policy: this document intentionally contains **no credentials, tokens, k
 - SSH between nodes: key `~/.ssh/internuc` (nuc1→nuc2, nuc1→nuc3).
 - Timezone: Australia/Melbourne. Locale-aware dates in reports.
 - Docker on nuc1 and nuc2; compose files under `/home/harman/containers/` (nuc1) and per-project dirs (nuc2).
-- All user-facing automated messaging targets Telegram chat `6667249402` via `~/.hermes/bin/notify_telegram.sh` (token resolved from OpenBao per call; failed sends queue in `state/pending/`).
+- All user-facing automated messaging targets Telegram chat `6667249402` via `~/.hermes/bin/notify_telegram.sh` (token resolved from OpenBao per call; failed sends append to `~/.hermes/state/notify_failed.log` (append-only, no auto-retry)).
 
 ## 1. Model plane
 
@@ -30,7 +30,7 @@ Secrets policy: this document intentionally contains **no credentials, tokens, k
 
 ### 1.2 Model inventory & routing (as of 2026-09-29)
 
-~153 model names, 156 deployments. Route classes by `api_base`:
+156 model names / 156 deployments (one deployment per name). Route classes by `api_base`:
 
 | Route | Count | Notes |
 |---|---|---|
@@ -51,7 +51,7 @@ Secrets policy: this document intentionally contains **no credentials, tokens, k
 
 - Container `ollama/ollama:latest`, v0.35.1. Volume `/home/harman/containers/ollama:/root/.ollama`.
 - Env tuning: `OLLAMA_HOST=0.0.0.0`, `OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q8_0`, `OLLAMA_MAX_LOADED_MODELS=3`, `OLLAMA_KEEP_ALIVE=30m`.
-- Models resident: `qwen3.6:35b-a3b` (23.9GB), `qwen3:30b-a3b` (18.6GB, MoE), `qwen3-coder:30b` (18.6GB), `gpt-oss:20b` (13.8GB), `embeddinggemma` (0.6GB).
+- Models installed: `qwen3.6:35b-a3b` (23.9GB), `qwen3:30b-a3b` (18.6GB, MoE), `qwen3-coder:30b` (18.6GB), `gpt-oss:20b` (13.8GB), `embeddinggemma` (0.6GB). Loaded on demand; up to 3 resident, unloaded after 30m idle.
 - Context notes: gpt-oss:20b 131k ctx; qwen3:30b degrades past 8k ctx (chunk long inputs).
 - LAN-exposed intentionally for Home Assistant and OpenCode fallback. In LiteLLM as `*-local` routes.
 - CPU-only inference; expect ~1-10 tok/s on 20-35B models. Never assume GPU offload.
@@ -74,7 +74,7 @@ Secrets policy: this document intentionally contains **no credentials, tokens, k
 ### 3.3 Tools
 
 - Terminal (local backend; nuc2/nuc3 via SSH with `~/.ssh/internuc`), file tools, patch, web_search (SearXNG backend at nuc1:3020), web_extract (search-only; extraction needs alternate backend), browser (Cloudflare Kitesurf remote browser via chrome-devtools-mcp websocket; args include `--category-experimental-webmcp`), code_execution (persistent kernel), delegate_task (subagents), cronjob_manage, TTS/STT, Home Assistant tools (HASS_URL + token), vision.
-- MCP servers (config `mcp_servers`): `memory_mcp` (https://agent-memory-proxy.hn-cf1.workers.dev/mcp, Bearer), `kitesurf` (local npx chrome-devtools-mcp → CF browser-run), `cloudflare_blog` (blog.mcp.cloudflare.com), `shared_metrics`.
+- MCP servers (config `mcp_servers`): `memory_mcp` (https://agent-memory-proxy.hn-cf1.workers.dev/mcp, Bearer), `kitesurf` (local npx chrome-devtools-mcp → CF browser-run), `cloudflare_blog` (blog.mcp.cloudflare.com), (telemetry) `shared_metrics`.
 
 ### 3.4 Memory system
 
@@ -103,11 +103,11 @@ Secrets policy: this document intentionally contains **no credentials, tokens, k
 ### 4.1 Components
 
 - **Dispatcharr** (container, :9191): channel/EPG manager. Profiles: curated profile (hand-picked channels, ~924) + full profile. Auth: `X-API-Key` header, key via `media_keys.dispatcharr_key()` (from OpenBao→hermes.env injection chain). Base URL from scripts: `http://localhost:9191` on-box.
-- **IPTV provider**: Xtream Codes API, base `http://uwptgchb.qvpng.com`, creds `iptv_xtream` in `~/.hermes/config/keys.json` (username/password/urls/auth/note). Provider reshuffles channels/EPG periodically (~10h auto-sync behavior; group scrambles).
+- **IPTV provider**: Xtream Codes API, base from `keys.json['iptv_xtream'].urls`, creds `iptv_xtream` in `~/.hermes/config/keys.json` (username/password/urls/auth/note). Provider reshuffles channels/EPG periodically (~10h auto-sync behavior; group scrambles).
 - **Emby** (container, :2095 HTTP, :8920 HTTPS): the media server. Library ~9,387 movies, 49 series, 1,056 episodes. API: `/emby/Items?api_key=...`, key in `keys.json['emby']` (host/port/api_key/auth_header/ssh_user/ssh_key).
 - **epg-grabber** (container, iptv-org EPG image): schedule-driven EPG fetching, configured by `epg_channels_builder` output.
 - **Traefik tfk02** (:80/:443/:2096): reverse proxy, TLS termination.
-- **openbao** (container, :8200): secrets. **openbao agent can fail (connection refused)** — agents must handle secret-fetch failure gracefully and alert.
+- **openbao** (container on nuc2, :8200): secrets store. The OpenBao Agent rendering env files runs on nuc1 (`bao-agent@hermes.service`); if the nuc2 store is down, agents must handle secret-fetch failure gracefully and alert (Telegram notify has a cached-token fallback).
 
 ### 4.2 iptv-maint (Rust)
 
@@ -115,8 +115,8 @@ Secrets policy: this document intentionally contains **no credentials, tokens, k
 - Subcommands: `reconcile` (Dispatcharr profile curation), `strm-sync` (Xtream VOD/series → Emby .strm/.nfo; flags `--dry-run --movies --series --categories --search --added-since --max --series-ids --refresh-emby --force`), `series-tracker` (init|sync|discover|recheck|list|status|add), `series-sync-cron`, `vod-reconcile` (`--audit --apply --enrich [N] --force`), `epg-build`, `epg-refresh`, `override-restore`, `emby-tags` (list|add), `provider-ping`, `profile-sync`.
 - HTTP semantics: parity with Python urllib — per-socket idle timeouts (connect/recv_response/recv_body, no global wall-clock) and **256MB response read limit** (urllib reads unlimited; ureq default 10MB broke 101.7MB get_series payloads — fixed commit 4d56f68).
 - State files (nuc2, `/datadrive/elfmedia/strm/`): `sync_state.json`, `vod_info_cache.json`, `series_tracker.json`, plus pre-cutover backups `*.cutover-backup-20260920`.
-- Scheduling (Hermes cron on nuc1, SSH to nuc2): STRM Sync 02:00 daily (two passes: `[MULTI-ZONE] TOP 2026 MOVIES`-class category + `[IN] BOLLYWOOD,[IN] PUNJABI --added-since 365`), EPG refresh 09:00/21:00, series sync Sun 02:00, override-restore Sun 03:00 (currently disabled), VOD reconcile Sun 06:00, discovery 01st/15th 03:00, provider check 00:00.
-- Every job prompt embeds `# PY-ROLLBACK` commands (legacy Python invocations) for instant revert.
+- Scheduling (Hermes cron on nuc1, SSH to nuc2): STRM Sync 02:00 daily (two passes: `[MULTI-LANG] TOP 2026 MOVIES` category (`--search '2026'`) + `[IN] BOLLYWOOD,[IN] PUNJABI --added-since 365`), EPG refresh 09:00/21:00, series sync Sun 02:00, override-restore Sun 03:00 (`enabled: false` in jobs.json — currently disabled), VOD reconcile Sun 06:00, discovery 01st/15th 03:00, provider check 00:00.
+- Every IPTV agent job prompt embeds `# PY-ROLLBACK` commands (legacy Python invocations) for instant revert (8 of 14 jobs; non-IPTV jobs don't need it).
 - Legacy Python: `nuc2:/home/harman/iptv-maintenance/*.py` (12 scripts) retained as rollback; `reconciler.py` is manual-only (watchdog retired 2026-08-21).
 - Source repo: `nuc1:/home/harman/iptv-rust/` (git). Multi-agent build history: agy (Gemini) + opencode panels + Claude Opus oversight; live-parity protocol in repo `PANEL-PROTOCOL.md`, `ARCHITECTURE-FINAL.md`.
 
@@ -136,7 +136,7 @@ Secrets policy: this document intentionally contains **no credentials, tokens, k
 
 ## 5.5 Other running components (full inventory)
 
-- **Kal download stack** (n1, docker compose in `~/kal/`): `kal-gluetun` (WireGuard VPN egress via Surfshark NL, P2P-allowed region), `kal-gluetun` → `kal-qbittorrent` (linuxserver qBittorrent behind the VPN netns), `kal-monitor` (custom container watching an RSS feed for The Daily Show episodes, triggering downloads and post-processing into Emby). Egress ONLY through the VPN container; no other networking.
+- **Kal download stack** (n1, docker compose in `~/kal/`): `kal-gluetun` (OpenVPN custom config, remote port 1194; VPN egress for qBittorrent; firewall allows inbound 6881), `kal-qbittorrent` (linuxserver qBittorrent; `network_mode: service:gluetun` so ALL its traffic goes through the VPN), `kal-monitor` (custom container on its own bridge `kal_kal-net`, watching showRSS for The Daily Show episodes, then copying completed files to nuc2 `/datadrive/elfmedia/strm/Series/The Daily Show/` via scp — NOT through the VPN; VPN remote is a bare IP in a custom .ovpn, provider not verified).
 - **Host crontabs (n1, user harman)** - non-Hermes scheduled jobs:
   - `5,20,35,50 * * * *` litellm_watchdog.sh --also-check-gateway → notify_telegram
   - `1-59/5 * * * *` ipsec-watchdog/check_ipsec.sh
@@ -153,16 +153,16 @@ Secrets policy: this document intentionally contains **no credentials, tokens, k
 
 - DNS: `.home.arpa` (mDNS/static hosts) + `.nagra.family` public zone.
 - Ingress: Traefik on nuc2 for internal TLS; **Cloudflare Tunnel** (`nagra-family-cloudflared` on nuc2) for selected services — no port forwards; access controlled at Cloudflare side.
-- IPsec: Cloudflare Magic-WAN VTI tunnel on OPNsense (nuc3 VM), peer 10.10.10.0/30-ish (10.110.110.1 ↔ .0). Watchdog `nuc1:~/ipsec-watchdog/check_ipsec.sh`, cron `1-59/5 * * * *` (offsets avoid LiteLLM watchdog ticks at :05/:20/:35/:50). Phase 1 = monitor-only (no `state/PHASE2` file). Restart ladder (Phase 2): `configctl ipsec stop; sleep 5; configctl ipsec start` — NEVER `configctl ipsec restart` (race, opnsense/core#7518). State: `state/state.json` (schema 1), `state/history.log` TSV (10 cols, monthly rotate, 90d retention), `state/pending/` queue for failed Telegram sends.
+- IPsec: Cloudflare Magic-WAN VTI tunnel on OPNsense (nuc3 VM), VTI point-to-point /31: local `10.110.110.1`, peer `10.110.110.0`. Watchdog `nuc1:~/ipsec-watchdog/check_ipsec.sh`, cron `1-59/5 * * * *` (offsets avoid LiteLLM watchdog ticks at :05/:20/:35/:50). Phase 1 = monitor-only (no `state/PHASE2` file; `state/NO_REMEDIATE` also present, forcing monitor mode). Restart ladder (Phase 2): `configctl ipsec stop; sleep 5; configctl ipsec start` — NEVER `configctl ipsec restart` (race, opnsense/core#7518). State: `state/state.json` (schema 1), `state/history.log` TSV (10 cols, monthly rotate, 90d retention), `state/pending/` queue for failed Telegram sends.
 - LiteLLM watchdog: `litellm_watchdog.sh`, silent-on-healthy, flock-deduped. Runs from TWO schedulers: host crontab `5,20,35,50 * * * *` AND Hermes jobs.json `*/10` (redundant coverage; flock prevents double-notify).
 - Flight tracking: `fr24feed`, `opensky`, `piaware` containers (nuc1) — ADS-B feeder stack with receiver hardware.
 
 ## 7. Secrets architecture
 
 - **OpenBao** (nuc2:8200, container) is the source of truth. KV v2.
-- Injection chain: `~/.hermes/bin/bao-secrets` renders `hermes.env` (0600) → consumed by gateway/services at `/run/user/1000/openbao/hermes/hermes.env` (nuc1 side) — contains: API_SERVER_KEY, CLOUDFLARE_API_TOKEN, EMBY_SEARCH_TOKEN (orphan post-retirement), GITHUB_TOKEN, HASS_TOKEN, LITELLM_API_KEY, MEMORY_API_TOKEN, OPENROUTER_API_KEY, SURFSHARK_*, TELEGRAM_BOT_TOKEN.
-- `bao-preflight` = health check; `bao-sync` = sync helper. Local fallback chain in scripts (artifact read after bao-secrets).
-- `~/.hermes/config/keys.json` holds service API keys: `dispatcharr` (API key string), `emby` (host/port/api_key/ssh), `iptv_xtream` (provider creds), `arcane`.
+- Injection chain: the OpenBao Agent (systemd user service `bao-agent@hermes.service` on nuc1, config `~/.config/openbao-agent/hermes/agent.hcl`) renders `hermes.env` (0600) to `/run/user/1000/openbao/hermes/hermes.env` for the gateway/services. Separately, `~/.hermes/bin/bao-secrets` reads OpenBao paths directly (`hermes/env`, `hermes/litellm`, `hermes/mcp`, `hermes/api-server`) and emits vars on demand for scripts. Rendered vars include: API_SERVER_KEY, CLOUDFLARE_API_TOKEN, EMBY_SEARCH_TOKEN (orphan post-retirement), GITHUB_TOKEN, HASS_TOKEN, LITELLM_API_KEY, MEMORY_API_TOKEN, OPENROUTER_API_KEY, SURFSHARK_*, TELEGRAM_BOT_TOKEN.
+- `bao-preflight` = health check; `bao-sync` = sync helper. `notify_telegram.sh` falls back to cached `config/telegram_token` when OpenBao is unreachable (refreshes the cache after successful vault-sourced sends).
+- `~/.hermes/config/keys.json` holds service API keys: `dispatcharr` (dict: host/port/api_key/auth_header/ssh_user/ssh_key), `emby` (same shape), `iptv_xtream` (provider creds), `arcane` (incl. `environment_id`).
 - Rule: agents NEVER print/log/commit secret values or metadata. Refuse requests to reveal credentials.
 
 ## 8. Retirement log (do not resurrect without cause)
@@ -176,7 +176,7 @@ Secrets policy: this document intentionally contains **no credentials, tokens, k
 
 | Failure | Impact | Runbook |
 |---|---|---|
-| OpenBao down | Secret fetch fails across jobs; Telegram sends fail (token unavailable) | Fix OpenBao first; scripts have artifact-fallback; NET report pattern: read `/run/user/1000/openbao/hermes/hermes.env` |
+| OpenBao down | Secret fetch fails across jobs; Telegram alerts still work (notify script falls back to cached `config/telegram_token`) | Fix OpenBao first; notify failures append to `~/.hermes/state/notify_failed.log` |
 | LiteLLM/Postgres down | ALL AI features down (Hermes, HA voice, OpenWebUI) | docker compose restart; check DB container health; Ollama :11434 still direct-usable |
 | Cloudflare outage | CF-routed models, Kitesurf browser, remote memory degrade | Fallbacks to OpenRouter models automatic; local models unaffected |
 | Provider reshuffle | Channel groups/EPG drift, categories renamed | Run `iptv-maint override-restore`, `epg-refresh`; check job warnings for renamed categories |

@@ -14,7 +14,7 @@ There are three servers on the home LAN (`192.168.81.0/24`, `home.arpa` DNS):
 | **nuc2** | 192.168.81.252 | Media: IPTV ingestion (Dispatcharr), Emby media server, OpenBao secrets, reverse proxy |
 | **nuc3** | 192.168.81.253 | Proxmox host running VMs (including an OPNsense firewall VM and a UniFi controller) |
 
-All three are Intel NUC-class mini PCs on the same LAN. nuc1 has 64 GB RAM and an Intel Iris Xe iGPU (no discrete GPU — local models run on CPU).
+All three are Intel NUC-class mini PCs on the same LAN. nuc1 has 64 GB RAM and an Intel Iris Xe iGPU (no discrete GPU — local models run on CPU). Specs for nuc2/nuc3: not documented here (not verified at time of writing).
 
 ---
 
@@ -27,7 +27,7 @@ All three are Intel NUC-class mini PCs on the same LAN. nuc1 has 64 GB RAM and a
 - **Routing:** ~153 named models are configured. Names tell you the route: `or-...` = OpenRouter (hundreds of third-party models), `ha-*` = Home Assistant helpers, local names (`gpt-oss-local`, `qwen3-general`, `embed-local`) = Ollama on the same box. The bulk of traffic goes through the **Cloudflare AI Gateway** (Workers AI / `@cf/...` models), billed through the owner's Cloudflare account.
 - **Access control:** a master key for admin; per-client keys can be issued with budgets and rate limits. All clients authenticate — nothing talks to a model provider directly.
 - **State in PostgreSQL:** models, fallbacks, and virtual keys live in the database (Postgres 16 container), not in the YAML — the YAML is intentionally near-empty to avoid split-brain config.
-- **Caching and router state in Valkey** (Redis-compatible, Alpine) — 64 MB, persistence on.
+- **Caching and router state in Valkey** (Redis-compatible, Alpine) — 64 MB cap, RDB snapshot every 60s if ≥1 write, no AOF, `noeviction` (writes fail rather than evict when full).
 - **Fallbacks:** if a model fails, LiteLLM retries or falls back per configured chains (e.g. the home assistant models fall back between Cloudflare and OpenRouter variants).
 
 **Why it matters:** one place to control cost, access, logging, and failover for every AI consumer in the house. No app holds its own API keys to external providers.
@@ -36,7 +36,7 @@ All three are Intel NUC-class mini PCs on the same LAN. nuc1 has 64 GB RAM and a
 
 **What it is:** a container running local open-weight models on CPU (Iris Xe iGPU is not used for inference).
 
-**Models kept loaded:**
+**Models installed** (loaded on demand; up to 3 resident, unloaded after 30 min idle):
 
 | Model | Size | Use |
 |---|---|---|
@@ -57,12 +57,12 @@ Tuned for this hardware: flash attention on, KV cache quantized (q8_0), up to 3 
 **What it does:**
 
 - **Conversations** on Telegram (and CLI/API endpoints). One persistent agent identity per chat with memory across sessions.
-- **Model access** only through LiteLLM (`http://nuc1:4000/web/v1`). Default model `glm-5.3-flash-Routed`; fallback chains handled by the gateway. No provider keys in Hermes itself.
-- **Tools:** terminal, file editing, web search (SearXNG), browser automation (Cloudflare "Kitesurf" remote browser via Chrome DevTools protocol), code execution, image understanding, TTS/STT, Home Assistant control, and MCP servers (memory, media search, blog reader).
+- **Model access** only through LiteLLM (`http://nuc1:4000/v1`). Default model `glm-5.3-flash-Routed`; fallback chains handled by the gateway. No provider keys in Hermes itself.
+- **Tools:** terminal, file editing, web search (SearXNG), browser automation (Cloudflare "Kitesurf" remote browser via Chrome DevTools protocol), code execution, image understanding, TTS/STT, Home Assistant control, and MCP servers (memory, Kitesurf browser, Cloudflare blog).
 - **Memory:** two layers — a compact local memory file (injected into every session) and a Cloudflare-hosted vector memory (agent-memory-proxy worker) for semantic recall.
-- **Scheduled jobs (cron):** ~14 jobs run autonomously — IPTV maintenance (see §4), a weekly stock research report, memory bookkeeping, media heartbeats, an IPsec tunnel watchdog. Each sends its report to Telegram in plain English.
+- **Scheduled jobs (cron):** ~14 jobs run autonomously — IPTV maintenance (see §4), a weekly stock research report, memory bookkeeping, media heartbeats, Each sends its report to Telegram in plain English.
 - **API server:** an OpenAI-compatible endpoint on `nuc1:8642` so other home software can use the agent programmatically (authenticated).
-- **Secrets:** no plaintext credentials in config — secrets resolve at runtime from OpenBao on nuc2 (and injected environment).
+- **Secrets:** OpenBao (on nuc2) is the source of truth — most secrets are injected at runtime. A small set of service keys and a cached Telegram token still sit in 0600 files under `~/.hermes/config/` (migration pending).
 
 **In this house Hermes is also the operator:** it maintains the other systems — the IPTV pipeline, backups, watchdogs — under rules you set (no unapproved changes, all changes backed up, plain-English reporting).
 
@@ -73,7 +73,7 @@ Tuned for this hardware: flash attention on, KV cache quantized (q8_0), up to 3 
 **Components:**
 
 - **Dispatcharr** (nuc2:9191) — channel management: ingests the provider's channels and EPG, manages "profiles" (channel lineups). The curated profile is kept to a hand-picked set of channels.
-- **IPTV provider** — an Xtream-Codes-API provider (base URL `http://uwptgchb.qvpng.com`). Provides live TV, VOD movies and series with metadata.
+- **IPTV provider** — an Xtream-Codes-API provider (hostname held in the credential store). Provides live TV, VOD movies and series with metadata.
 - **iptv-maint (Rust binary, on nuc2 at `~/bin/iptv-maint`)** — the maintenance engine, a rewrite of the original Python scripts. Eleven subcommands cover: syncing movies and series into Emby-compatible `.strm`/`.nfo` files, reconciling and cleaning the library, building and refreshing the EPG (TV guide), restoring channel groups after provider shuffles, checking provider health, and tagging Emby items. It runs from Hermes cron (nightly movie sync, twice-daily EPG refresh, weekly series/cleanup jobs, midnight provider check). All writes are preceded by state backups and every job reports to Telegram.
 - **Emby** (nuc2:2095) — the media server the family actually uses. Library currently ~9,400 movies, 49 series, 1,000+ episodes, all populated by the pipeline above.
 - **EPG sources** — iptv-org EPG plus the provider's own guide data, matched to channels and cached.
@@ -82,7 +82,7 @@ Tuned for this hardware: flash attention on, KV cache quantized (q8_0), up to 3 
 
 ## 5. Supporting cast
 
-- **OpenBao** (nuc2:8200) — open-source HashiCorp Vault fork. Central secret store: Telegram bot token, Cloudflare token, LiteLLM key, etc. Agents and scripts fetch secrets at runtime; nothing sensitive sits in plaintext config. (Note: OpenBao has had an outage; workarounds documented in ops notes.)
+- **OpenBao** (nuc2:8200) — open-source HashiCorp Vault fork. Central secret store: Telegram bot token, Cloudflare token, LiteLLM key, etc. Agents and scripts fetch secrets at runtime (see the security section for the small set of remaining local key files). It had an outage in October 2026 (incident notes: `~/openbao-incident-20261004/` on nuc1); mitigations are documented there.
 - **Traefik ("tfk02", nuc2:80/443)** — reverse proxy for internal services with TLS.
 - **Cloudflare Tunnel (`nagra-family-cloudflared`)** — selected internal services reachable remotely without port-forwarding; Cloudflare-side access policies apply.
 - **SearXNG** (nuc1:3020) — self-hosted meta search engine, used as Hermes' web search backend (no tracking, aggregated results).
@@ -100,14 +100,23 @@ Tuned for this hardware: flash attention on, KV cache quantized (q8_0), up to 3 
 ## 6. Security posture (summary)
 
 - Single model gateway with authenticated access; no provider keys scattered in apps.
-- Secrets centralized in OpenBao; plaintext secrets banned from config files and repos.
-- No unauthenticated public endpoints: everything either LAN-only, behind the authenticated API, or behind Cloudflare Tunnel with access policies.
-- The only third-party paid surfaces are the IPTV subscription, OpenRouter (via LiteLLM), and Cloudflare (Workers AI, tunnels, memory).
+- Secrets centralized in OpenBao; no secrets in repos or git history. A small set of 0600-protected plaintext service keys remain under `~/.hermes/config/` (documented, migration to OpenBao pending).
+- Exposure summary (trust boundaries):
+
+| Zone | Services |
+|---|---|
+| LAN-only, unauthenticated | Ollama (:11434), Wyoming voice (:10200/:10300), SearXNG (:3020), ADS-B feeders |
+| Authenticated (LAN or API key) | LiteLLM (:4000), Hermes API (:8642), Dispatcharr (:9191), Emby (:2095) |
+| Cloudflare Tunnel | selected internal services, access-controlled at Cloudflare |
+| Magic-WAN / IPsec inbound | Emby (remote family access), Minecraft (Crafty ports 19132/udp, 24454/udp, 25500-25600/tcp) |
+
+No port-forwarding on the router; inbound paths are the IPsec tunnel and Cloudflare Tunnel only.
+- Third-party paid surfaces: IPTV subscription, Surfshark VPN, Cloudflare (Workers AI, tunnels, memory). Anthropic-direct and OpenRouter routes are configured in the gateway but recorded zero usage in the last 30 days (all traffic runs via Cloudflare).
 - Backups before changes; watchdogs alert to Telegram; the agent follows a "report in plain English" convention for all automated messaging.
 
 ## 7. Where things can break
 
-- **OpenBao down** → agents can't fetch secrets → scheduled jobs fail at the secret step (mitigations documented; fix OpenBao first).
-- **Provider reshuffles** → channel groups and EPG drift → the `override-restore` and `epg-refresh` jobs exist exactly for this.
+- **OpenBao down** → agents can't fetch secrets → scheduled jobs fail at the secret step. Telegram alerts keep working (notify script falls back to a cached token copy). Fix OpenBao first.
+- **Provider reshuffles** → channel groups and EPG drift → the `override-restore` and `epg-refresh` jobs exist exactly for this (note: `override-restore` is currently disabled)
 - **LiteLLM/Postgres down** → all AI features stop (Hermes, OpenWebUI, HA voice). Local Ollama still works directly on :11434.
 - **Cloudflare outages** → remote browser, AI Gateway models, and remote memory degrade; local models and Emby are unaffected.

@@ -1,0 +1,86 @@
+# Review: README.md and TECHNICAL.md (checked against the live system on 2026-10-11)
+
+**Method:** I read both docs in full and checked their claims on nuc1 (`docker ps`, `crontab -l`, `jobs.json`, Hermes and LiteLLM config, Ollama, the LiteLLM database, the scripts) and on nuc2 over ssh (`docker ps`, the iptv-maint binary, the STRM tree). I never printed any secret values.
+
+## Secrets audit: passed
+- No tokens, passwords, API keys, Cloudflare account ID or `sk-` strings appear in either doc or in git history.
+- Both docs do contain some identifiers. None of them is a credential: Telegram chat ID `6667249402`, the `hn-cf1.workers.dev` subdomain, the AI Gateway ID `nagragateway`, the memory scope `user:hp-sn`, and the IPTV provider hostname. See finding 12.
+
+## What I confirmed is correct
+- **nuc1 hardware and addresses:** IPs, IPv6 ULA, i7-13700H, 64 GB RAM.
+- **Container inventory** on both hosts.
+- **LiteLLM:** the command line, healthcheck and Valkey flags all match. Config is minimal with an empty `model_list` and models stored in the database. The route counts 84/56/10/6 sum to 156 rows. Over the last 30 days 100% of requests went through the Cloudflare/other route class, so the "bulk of traffic" claim holds.
+- **Ollama:** version 0.35.1, the environment tuning and the volume match.
+- **Hermes:** version string, default model, and that `API_SERVER_KEY` is an env reference rather than a literal.
+- **Hermes cron:** 14 jobs. Every schedule matches, and no job pins a model.
+- **Host crontab:** all 5 lines match.
+- **Memory caps:** 4000 and 1375 characters. MEMORY.md is 3993 chars / 4035 bytes, which confirms the doc's bytes-vs-characters note.
+- **iptv-maint:** symlink target and sha256 prefix match, 12 legacy `.py` scripts, state files and cutover backups present, 9,387 movie `.strm` files, 49 series.
+- **IPsec watchdog:** the `PHASE2` gate, the stop/start ladder, the `#7518` reference and the 90-day retention all match.
+
+## Findings
+
+1. **HIGH: README overstates how secrets are handled (README:65, :85, :103).** It says there are "no plaintext credentials in config" and that plaintext secrets are "banned from config files." In reality:
+   - `~/.hermes/config/keys.json` (mode 0600) holds plaintext `api_key` values for dispatcharr, emby and arcane, plus the Xtream username and password.
+   - `config/telegram_token` is a plaintext copy of the bot token that `notify_telegram.sh` refreshes on purpose.
+   - `config/gmail_app_password` and `keys.json.pre-bao` also exist.
+   
+   **Fix:** reword to "OpenBao is the source of truth; a small set of service keys and a cached Telegram token still sit in 0600 files under `~/.hermes/config/` (migration pending)." A security engineer will spot this immediately.
+
+2. **HIGH: README's security posture leaves out the inbound exposure paths (README:104).** "No unauthenticated public endpoints … behind Cloudflare Tunnel with access policies" is too absolute.
+   - The IPsec watchdog's own alert text says the Magic-WAN tunnel carries **external Emby and Minecraft** traffic.
+   - Crafty publishes 19132/udp, 24454/udp and 25500-25600/tcp.
+   - Ollama listens on `0.0.0.0:11434` with no authentication.
+   
+   **Fix:** add a short exposure table with three columns: LAN-only unauthenticated (Ollama, Wyoming, SearXNG, piaware), Cloudflare Tunnel, and Magic-WAN/IPsec inbound (Emby, Minecraft). Also say what the tunnel is for in §5, because it currently only appears as "a watchdog."
+
+3. **HIGH: README has the wrong Hermes→LiteLLM URL (README:60).** It says `http://nuc1:4000/web/v1`. The config has `base_url: http://nuc1:4000/v1`. **Fix:** change it to `/v1`.
+
+4. **MED: "Models kept loaded" / "Models resident" is wrong (README:39, TECHNICAL:54).** `OLLAMA_MAX_LOADED_MODELS=3` and keep-alive is 30m. The four large models add up to about 76 GB on a 64 GB box, and `ollama ps` currently shows nothing loaded. **Fix:** say "Models installed (loaded on demand; up to 3 resident, unloaded after 30 min idle)."
+
+5. **MED: README still lists the retired media-search MCP (README:61).** "MCP servers (memory, media search, blog reader)" contradicts TECHNICAL §8, which retires `emby_search`. The live MCP servers are `memory_mcp`, `kitesurf` and `cloudflare_blog`. Separately, TECHNICAL:77 lists `shared_metrics` as an MCP server, but in config it is `telemetry.shared_metrics`. **Fix:** correct both lists.
+
+6. **MED: README lists the IPsec watchdog as a Hermes cron job (README:63).** It is not in `jobs.json`. It runs from the host crontab (`1-59/5`). **Fix:** remove it from the Hermes list. It is already covered correctly at README:93.
+
+7. **MED: The "OpenBao down" failure mode is described wrongly (README:110, TECHNICAL:179).** `notify_telegram.sh` falls back to the cached `config/telegram_token`, so Telegram alerts **keep working** when OpenBao is down. Also, failed sends go to `~/.hermes/state/notify_failed.log`, which is append-only with no retry. They do not go to `state/pending/`; that queue belongs to the IPsec watchdog. TECHNICAL:18 has this wrong. **Fix:** correct both.
+
+8. **MED: TECHNICAL describes the secret injection chain backwards (TECHNICAL:163–164, :110).**
+   - `hermes.env` is rendered by the **OpenBao Agent**, which runs as the systemd user service `bao-agent@hermes.service` on **nuc1** and uses `~/.config/openbao-agent/hermes/agent.hcl`.
+   - `bao-secrets` reads OpenBao paths directly (`hermes/env`, `hermes/litellm`, `hermes/mcp`, `hermes/api-server`). It does not render the file.
+   - Line 110 puts "openbao agent can fail" under the nuc2 container, but the agent runs on nuc1.
+   
+   **Fix:** rewrite §7 to match.
+
+9. **MED: Kal stack details are wrong (TECHNICAL:139, README:92).**
+   - gluetun runs **OpenVPN** (`VPN_SERVICE_PROVIDER=custom`, `custom.ovpn`, remote port 1194), not WireGuard.
+   - The firewall allows inbound 6881.
+   - "Egress ONLY through the VPN; no other networking" is true only for qBittorrent, which uses `network_mode: service:gluetun`. `kal-monitor` sits on its own bridge `kal_kal-net` and copies files to nuc2's `/datadrive/elfmedia/strm/Series/...` over scp, not through the VPN.
+   - I couldn't confirm "Surfshark NL" from the config because the remote is a bare IP. Check it or soften the wording.
+
+10. **MED: README leaves Anthropic out of the cost picture (README:27, :105).** There are 10 Anthropic-direct deployments, and the Surfshark VPN is also a paid subscription. "The only third-party paid surfaces are IPTV, OpenRouter, Cloudflare" is therefore incomplete. **Fix:** add both, or note that the Anthropic routes are configured but unused (0 requests in 30 days).
+
+11. **MED: Wrong STRM category name (TECHNICAL:118).** The doc says `[MULTI-ZONE] TOP 2026 MOVIES`. The job prompt uses `[MULTI-LANG] TOP 2026 MOVIES` with `--search '2026'`. An agent copying the doc would sync nothing. **Fix:** use the exact string.
+
+12. **LOW–MED: Unneeded identifiers.** The IPTV provider hostname (README:76) adds nothing for the owner. For Xtream providers the hostname is one third of the login and identifies the reseller. **Fix:** drop it from README and in TECHNICAL refer to `keys.json['iptv_xtream'].urls` instead. The chat ID, `hn-cf1` and `nagragateway` are acceptable in TECHNICAL but not needed. Consider listing "structural identifiers" explicitly in the policy on line 5.
+
+13. **LOW: Wrong IPsec subnet (TECHNICAL:156).** "peer 10.10.10.0/30-ish" is wrong. The script uses VTI local `10.110.110.1` and peer `10.110.110.0`, which means a /31. Also mention the `NO_REMEDIATE` file, which is present and also forces monitor-only.
+
+14. **LOW: Model name count (README:27, TECHNICAL:33).** The docs say "~153 names, 156 deployments." The database has 156 rows and **156 distinct** `model_name`s. **Fix:** say 156.
+
+15. **LOW: PY-ROLLBACK coverage (TECHNICAL:119).** "Every job prompt embeds `# PY-ROLLBACK`" is not true: only 8 of the 14 jobs do. **Fix:** say "every IPTV agent job."
+
+16. **LOW: Dispatcharr keys.json shape (TECHNICAL:165).** It says `dispatcharr` is an "API key string." It is actually a dict (`host`, `port`, `api_key`, `auth_header`, `ssh_user`, `ssh_key`), the same shape as `emby`. `arcane` also has `environment_id`.
+
+17. **LOW: Override-restore is disabled but not flagged everywhere.** The job is `enabled=false`. README:111 presents it as an active mitigation, and the TECHNICAL:88 job list doesn't mark it. **Fix:** add "(currently disabled)" in both places.
+
+18. **LOW: Small README clarity fixes for a network engineer.**
+    - Valkey "persistence on" should say "RDB snapshot every 60s if ≥1 write; no AOF; `noeviction` at 64 MB, so writes fail rather than evict when full."
+    - Emby: only :2095 is published; :8920 is not mapped on the host (TECHNICAL:107 implies it is).
+    - README:85 "workarounds documented in ops notes" should name the actual file.
+    - Give nuc2 and nuc3 specs, or say they are unknown.
+
+**On readability:** the README is well pitched for the audience. It is direct, uses the right terms and avoids fluff, and the "Why it matters" lines work well. The main weakness is that the security section makes absolute claims without evidence (findings 1 and 2), and this reader will test exactly those claims. A single exposure/trust-boundary table would do more than the current bullets.
+
+## Verdict: **CHANGES-REQUIRED**
+
+There are no secret leaks, but findings 1–3 are factual errors in the owner-facing doc, two of them about security posture. Findings 4–11 would mislead an agent working from TECHNICAL.md.

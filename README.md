@@ -89,9 +89,12 @@ Tuned for this hardware: flash attention on, KV cache quantized (q8_0), up to 3 
 - **OpenWebUI** (nuc1:3000) — self-hosted ChatGPT-style front-end pointed at LiteLLM for manual model experiments.
 - **Voice stack (nuc1)** — Wyoming Whisper (speech-to-text, port 10300) and Wyoming Piper (text-to-speech, port 10200) for Home Assistant voice, with `ha-voice`/`ha-brain`/`ha-vision` LiteLLM models routing assistant LLM calls.
 - **Flight tracking (nuc1)** — FR24 feed, OpenSky, and PiAware containers feeding ADS-B data from an attached receiver.
-- **The "Kal" download stack (nuc1)** — gluetun (VPN), qBittorrent, and a monitor container that fetches a specific show (The Daily Show) daily and drops it into Emby.
+- **The "Kal" download stack (nuc1)** — gluetun (VPN via Surfshark NL, P2P-allowed), qBittorrent (routed through the VPN), and a monitor container that fetches The Daily Show daily and drops it into Emby.
 - **IPsec watchdog (nuc1 cron)** — pings the Cloudflare Magic-WAN IPsec tunnel peer every 5 minutes; alerts on failure via Telegram; safe restart sequence documented for Phase 2 (currently monitor-only).
 - **Home Assistant** — runs on this LAN (integrates with voice stack and LiteLLM `ha-*` models).
+- **Homarr** (nuc2:7575) — dashboard page with links and status for the self-hosted services.
+- **Crafty Controller** (nuc2:8585) — Minecraft server management panel for the family's game servers.
+- **Arcane** (nuc2) — keeps Docker images up to date automatically.
 - **nuc3 / Proxmox** — hypervisor (:8006) hosting VMs, including OPNsense (firewall with the Cloudflare IPsec tunnel) and UniFi Network controller.
 
 ## 6. Security posture (summary)

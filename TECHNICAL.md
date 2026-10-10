@@ -78,14 +78,14 @@ Secrets policy: this document intentionally contains **no credentials, tokens, k
 
 ### 3.4 Memory system
 
-- Layer 1 (local): `~/.hermes/memories/MEMORY.md` — ≤4000 chars, injected every session; contains operating state, conventions, incident learnings. Edits must replace/remove to stay under cap.
+- Layer 1 (local): `~/.hermes/memories/MEMORY.md` — ≤4000 chars, injected every session; contains operating state, conventions, incident learnings. Cap is CHARACTERS (4000) not bytes - on-disk byte size runs higher due to multi-byte chars (e.g. arrows). Edits must replace/remove to stay under cap.
 - Layer 2 (MCP): Cloudflare agent-memory (`memory_mcp` tools, scope `user:hp-sn`). Save triggers: SHIPPED/CHANGED/DECIDED/BROKE/LEARNED. Tags are accepted but ignored — retrieval is text-semantic only. Front-load dates/subjects; max 3 entries per work arc, 25/week.
 - User profile: `~/.hermes/memories/USER.md` (≤1375 chars).
 
 ### 3.5 Cron (scheduled autonomy)
 
 - Store: `~/.hermes/cron/jobs.json` (top-level `{jobs: [...]}` — an array, not dict). Runner: Hermes internal scheduler (no crontab for agent jobs). Per-job: prompt, schedule (cron expr), deliver target, optional script, no_agent flag.
-- Current jobs (14): NET Weekly Research (Fri 21:00), Daily EPG Refresh AM/PM (silent script jobs), Weekly Override Restore (Sun 03:00), Xtream STRM Sync (02:00), IPTV Provider Check (00:00), Weekly Series Episode Sync (Sun 02:00), Fortnightly Series Discovery (01st/15th 03:00), Daily Media Heartbeat, Weekly EPG Grabber Builder, Weekly VOD Reconcile (Sun 06:00), LiteLLM Watchdog (every 10m, silent-on-healthy script), MCP Memory Reconciler (daily 22:30), MCP Memory Hygiene (Sun 05:15).
+- Current jobs (14): NET Weekly Research (Fri 21:00), Daily EPG Refresh AM/PM (silent script jobs), Weekly Override Restore (Sun 03:00), Xtream STRM Sync (02:00), IPTV Provider Check (00:00), Weekly Series Episode Sync (Sun 02:00), Fortnightly Series Discovery (01st/15th 03:00), Daily Media Heartbeat, Weekly EPG Grabber Builder, Weekly VOD Reconcile (Sun 06:00), LiteLLM Watchdog (jobs.json */10 + crontab 5,20,35,50, flock-deduped, silent-on-healthy), MCP Memory Reconciler (daily 22:30), MCP Memory Hygiene (Sun 05:15).
 - Report style (enforced 2026-09-29): every agent job ends with plain-English report: `🧠 Memory check-in — 24 Sep` / status line ✅/⚠️/❌ / optional ≤3 bullets / `Next:` line on failure. Machine format (RECONCILER-V2 status=... etc.) is banned in report bodies. Spec: `~/.hermes/cache/scratch/notif-workdir/ARBITRATED-SPEC.md` with transaction helper for prompt edits (`notification-style-transaction.py`, stages: baseline/canary/media/content; supports preview/apply/verify/rollback using lock `~/.hermes/cron/.jobs.lock`).
 - Known wrapper: scheduler adds `Cronjob Response: <name> (job_id: ...)` header — not agent-controllable.
 
@@ -133,12 +133,28 @@ Secrets policy: this document intentionally contains **no credentials, tokens, k
 - HA assistant LLM calls route through LiteLLM models `ha-voice` (fast/short), `ha-brain` (reasoning), `ha-vision` (camera/image understanding) — CF-routed with OpenRouter fallbacks.
 - Hermes TTS: configurable provider (OpenAI-compatible via LiteLLM); STT for voice notes.
 
+
+## 5.5 Other running components (full inventory)
+
+- **Kal download stack** (n1, docker compose in `~/kal/`): `kal-gluetun` (WireGuard VPN egress via Surfshark NL, P2P-allowed region), `kal-gluetun` → `kal-qbittorrent` (linuxserver qBittorrent behind the VPN netns), `kal-monitor` (custom container watching an RSS feed for The Daily Show episodes, triggering downloads and post-processing into Emby). Egress ONLY through the VPN container; no other networking.
+- **Host crontabs (n1, user harman)** - non-Hermes scheduled jobs:
+  - `5,20,35,50 * * * *` litellm_watchdog.sh --also-check-gateway → notify_telegram
+  - `1-59/5 * * * *` ipsec-watchdog/check_ipsec.sh
+  - `30 3 * * 0` cf_model_sync_cron.sh (sync Workers-AI model list into LiteLLM DB)
+  - `15 4 * * 0` openrouter_model_sync_cron.sh (sync OpenRouter model list)
+  - `45 4 * * 0` run_alerted.sh litellm-governance → governance_report.py (usage/cost report to Telegram)
+- **OpenWebUI** (n1:3000): self-hosted chat UI pointed at LiteLLM for manual experiments; not part of the agent plane.
+- **homarr** (n2:7575): dashboard aggregating service links/status.
+- **crafty** (n2:8585→8443, plus 8123/19132/25500-25600): Minecraft server management panel (Crafty Controller) and its game servers.
+- **arcane** (n2): container image update manager (getarcaneapp/arcane); credentials key exists in keys.json.
+- **searxng-valkey** (n1): Valkey instance for SearxNG caching (separate from litellm-valkey).
+
 ## 6. Networking & edge
 
 - DNS: `.home.arpa` (mDNS/static hosts) + `.nagra.family` public zone.
 - Ingress: Traefik on nuc2 for internal TLS; **Cloudflare Tunnel** (`nagra-family-cloudflared` on nuc2) for selected services — no port forwards; access controlled at Cloudflare side.
 - IPsec: Cloudflare Magic-WAN VTI tunnel on OPNsense (nuc3 VM), peer 10.10.10.0/30-ish (10.110.110.1 ↔ .0). Watchdog `nuc1:~/ipsec-watchdog/check_ipsec.sh`, cron `1-59/5 * * * *` (offsets avoid LiteLLM watchdog ticks at :05/:20/:35/:50). Phase 1 = monitor-only (no `state/PHASE2` file). Restart ladder (Phase 2): `configctl ipsec stop; sleep 5; configctl ipsec start` — NEVER `configctl ipsec restart` (race, opnsense/core#7518). State: `state/state.json` (schema 1), `state/history.log` TSV (10 cols, monthly rotate, 90d retention), `state/pending/` queue for failed Telegram sends.
-- LiteLLM watchdog: cron `*/10` script job `litellm_watchdog.sh`, silent-on-healthy.
+- LiteLLM watchdog: `litellm_watchdog.sh`, silent-on-healthy, flock-deduped. Runs from TWO schedulers: host crontab `5,20,35,50 * * * *` AND Hermes jobs.json `*/10` (redundant coverage; flock prevents double-notify).
 - Flight tracking: `fr24feed`, `opensky`, `piaware` containers (nuc1) — ADS-B feeder stack with receiver hardware.
 
 ## 7. Secrets architecture

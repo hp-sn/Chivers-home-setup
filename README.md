@@ -1,6 +1,6 @@
 # Chivers Home Setup — Plain-English Documentation
 
-_Updated: 2026-09-29. Written by Hermes (the home AI agent), reviewed by Gemini and Claude._
+_Updated: 2026-10-11. Written by Hermes (the home AI agent), reviewed and revised through Gemini and Claude review rounds._
 
 This document explains what runs in this home, what each part does, and how they fit together. It is written for a network/security engineer: technical terms are fine, but I keep it plain and skip marketing fluff.
 
@@ -24,7 +24,7 @@ All three are Intel NUC-class mini PCs on the same LAN. nuc1 has 64 GB RAM and a
 
 **What it does:**
 
-- **Routing:** ~153 named models are configured. Names tell you the route: `or-...` = OpenRouter (hundreds of third-party models), `ha-*` = Home Assistant helpers, local names (`gpt-oss-local`, `qwen3-general`, `embed-local`) = Ollama on the same box. The bulk of traffic goes through the **Cloudflare AI Gateway** (Workers AI / `@cf/...` models), billed through the owner's Cloudflare account.
+- **Routing:** 156 named models are configured. Names tell you the route: `or-...` = OpenRouter (hundreds of third-party models), `ha-*` = Home Assistant helpers, local names (`gpt-oss-local`, `qwen3-general`, `embed-local`) = Ollama on the same box. The bulk of traffic goes through the **Cloudflare AI Gateway** (Workers AI / `@cf/...` models), billed through the owner's Cloudflare account.
 - **Access control:** a master key for admin; per-client keys can be issued with budgets and rate limits. All clients authenticate — nothing talks to a model provider directly.
 - **State in PostgreSQL:** models, fallbacks, and virtual keys live in the database (Postgres 16 container), not in the YAML — the YAML is intentionally near-empty to avoid split-brain config.
 - **Caching and router state in Valkey** (Redis-compatible, Alpine) — 64 MB cap, RDB snapshot every 60s if ≥1 write, no AOF, `noeviction` (writes fail rather than evict when full).
@@ -60,7 +60,7 @@ Tuned for this hardware: flash attention on, KV cache quantized (q8_0), up to 3 
 - **Model access** only through LiteLLM (`http://nuc1:4000/v1`). Default model `glm-5.3-flash-Routed`; fallback chains handled by the gateway. No provider keys in Hermes itself.
 - **Tools:** terminal, file editing, web search (SearXNG), browser automation (Cloudflare "Kitesurf" remote browser via Chrome DevTools protocol), code execution, image understanding, TTS/STT, Home Assistant control, and MCP servers (memory, Kitesurf browser, Cloudflare blog).
 - **Memory:** two layers — a compact local memory file (injected into every session) and a Cloudflare-hosted vector memory (agent-memory-proxy worker) for semantic recall.
-- **Scheduled jobs (cron):** ~14 jobs run autonomously — IPTV maintenance (see §4), a weekly stock research report, memory bookkeeping, media heartbeats, Each sends its report to Telegram in plain English.
+- **Scheduled jobs (cron):** ~14 jobs run autonomously — IPTV maintenance (see §4), a weekly stock research report, memory bookkeeping, media heartbeats. Each sends its report to Telegram in plain English.
 - **API server:** an OpenAI-compatible endpoint on `nuc1:8642` so other home software can use the agent programmatically (authenticated).
 - **Secrets:** OpenBao (on nuc2) is the source of truth — most secrets are injected at runtime. A small set of service keys and a cached Telegram token still sit in 0600 files under `~/.hermes/config/` (migration pending).
 
@@ -89,7 +89,7 @@ Tuned for this hardware: flash attention on, KV cache quantized (q8_0), up to 3 
 - **OpenWebUI** (nuc1:3000) — self-hosted ChatGPT-style front-end pointed at LiteLLM for manual model experiments.
 - **Voice stack (nuc1)** — Wyoming Whisper (speech-to-text, port 10300) and Wyoming Piper (text-to-speech, port 10200) for Home Assistant voice, with `ha-voice`/`ha-brain`/`ha-vision` LiteLLM models routing assistant LLM calls.
 - **Flight tracking (nuc1)** — FR24 feed, OpenSky, and PiAware containers feeding ADS-B data from an attached receiver.
-- **The "Kal" download stack (nuc1)** — gluetun (VPN via Surfshark NL, P2P-allowed), qBittorrent (routed through the VPN), and a monitor container that fetches The Daily Show daily and drops it into Emby.
+- **The "Kal" download stack (nuc1)** — gluetun (OpenVPN; egress via a third-party VPN endpoint, P2P-allowed), qBittorrent (routed through the VPN), and a monitor container that fetches The Daily Show daily and drops it into Emby.
 - **IPsec watchdog (nuc1 cron)** — pings the Cloudflare Magic-WAN IPsec tunnel peer every 5 minutes; alerts on failure via Telegram; safe restart sequence documented for Phase 2 (currently monitor-only).
 - **Home Assistant** — runs on this LAN (integrates with voice stack and LiteLLM `ha-*` models).
 - **Homarr** (nuc2:7575) — dashboard page with links and status for the self-hosted services.
@@ -111,7 +111,7 @@ Tuned for this hardware: flash attention on, KV cache quantized (q8_0), up to 3 
 | Magic-WAN / IPsec inbound | Emby (remote family access), Minecraft (Crafty ports 19132/udp, 24454/udp, 25500-25600/tcp) |
 
 No port-forwarding on the router; inbound paths are the IPsec tunnel and Cloudflare Tunnel only.
-- Third-party paid surfaces: IPTV subscription, Surfshark VPN, Cloudflare (Workers AI, tunnels, memory). Anthropic-direct and OpenRouter routes are configured in the gateway but recorded zero usage in the last 30 days (all traffic runs via Cloudflare).
+- Third-party paid surfaces: IPTV subscription, a commercial VPN (used by the download stack), Cloudflare (Workers AI, tunnels, memory). Anthropic-direct and OpenRouter routes are configured in the gateway but recorded zero usage in the last 30 days (all traffic runs via Cloudflare).
 - Backups before changes; watchdogs alert to Telegram; the agent follows a "report in plain English" convention for all automated messaging.
 
 ## 7. Where things can break
